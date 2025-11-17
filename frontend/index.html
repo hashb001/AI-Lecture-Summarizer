@@ -4,117 +4,40 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AI Lecture Summarizer</title>
-  <style>
-    body {
-      font-family: "Segoe UI", Roboto, sans-serif;
-      background: #f4f7fb;
-      color: #222;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      padding: 40px;
-    }
-    h1 {
-      color: #2c3e50;
-      margin-bottom: 0.5rem;
-    }
-    p {
-      color: #555;
-      margin-top: 0;
-      margin-bottom: 1.5rem;
-    }
-    .card {
-      background: white;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-      border-radius: 12px;
-      padding: 2rem;
-      width: 100%;
-      max-width: 600px;
-    }
-    input[type="file"] {
-      display: block;
-      margin: 1rem 0;
-    }
-    button {
-      background-color: #4a90e2;
-      color: white;
-      border: none;
-      padding: 10px 18px;
-      border-radius: 6px;
-      font-size: 15px;
-      cursor: pointer;
-      transition: background 0.2s ease;
-    }
-    button:hover {
-      background-color: #357ab8;
-    }
-    #result {
-      white-space: pre-wrap;
-      background: #f9fafb;
-      border: 1px solid #ddd;
-      border-radius: 6px;
-      padding: 12px;
-      margin-top: 1rem;
-      font-size: 15px;
-    }
-    #loading {
-      display: none;
-      color: #4a90e2;
-      font-weight: bold;
-    }
-  </style>
+  <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
-  <h1>AI Lecture Summarizer</h1>
-  <p>Upload your PowerPoint file to generate an AI summary.</p>
+  <div id="app">
+    <!-- Sidebar -->
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <h2>History</h2>
+        <button id="newChatBtn">＋</button>
+      </div>
+      <ul id="chatHistory"></ul>
+    </aside>
+    <!-- Main chat area -->
+    <section id="main">
+      <header>
+        <h1>AI Lecture Summarizer</h1>
+      </header>
+    <div id="progress" class="hidden">
+      <div id="progress-bar"></div>
+      <span id="progress-text">Preparing…</span>
+    </div>
+      <main id="chat-container">
+        <div id="messages"></div>
+      </main>
 
-  <div class="card">
-    <input type="file" id="pptxInput" accept=".pptx" />
-    <button onclick="summarize()">Summarize File</button>
-    <p id="loading">Summarizing... please wait ⏳</p>
-    <div id="result"></div>
+      <footer id="input-area">
+        <label id="uploadLabel" for="fileInput">📎</label>
+        <input type="file" id="fileInput" accept=".pptx" hidden />
+        <input type="text" id="userInput" placeholder="Type your message..." />
+        <button id="sendBtn">Send</button>
+      </footer>
+    </section>
   </div>
 
-  <script>
-    async function summarize() {
-      const fileInput = document.getElementById("pptxInput");
-      const resultDiv = document.getElementById("result");
-      const loading = document.getElementById("loading");
-
-      if (!fileInput.files.length) {
-        alert("Please choose a PPTX file first.");
-        return;
-      }
-
-      resultDiv.textContent = "";
-      loading.style.display = "block";
-
-      const formData = new FormData();
-      formData.append("file", fileInput.files[0]);
-
-      try {
-        const response = await fetch("http://127.0.0.1:8000/api/summarize/pptx", {
-          method: "POST",
-          body: formData,
-        });
-
-        const data = await response.json();
-        loading.style.display = "none";
-
-        if (data.error) {
-          resultDiv.textContent = "❌ " + data.error;
-        } else {
-          resultDiv.innerHTML = `
-            <h3>✅ Summary:</h3>
-            <p>${data.summary}</p>
-            <p><strong>Slides Processed:</strong> ${data.slides}</p>
-          `;
-        }
-      } catch (error) {
-        loading.style.display = "none";
-        resultDiv.textContent = "❌ Error: Could not connect to backend.";
-      }
-    }
-  </script>
+  <script src="/static/app.js"></script>
 </body>
 </html>

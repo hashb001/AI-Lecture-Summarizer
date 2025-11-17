@@ -1,0 +1,86 @@
+# backend/utils.py
+import re
+import uuid
+from pptx import Presentation
+from collections import Counter
+
+sessions = {}
+
+FOOTER_PATTERNS = [
+    r"https?://\S+",
+    r"\b\S+@\S+\b",
+    r"©|copyright",
+    r"\b(all rights reserved)\b",
+]
+FOOTER_RE = re.compile("|".join(FOOTER_PATTERNS), re.I)
+
+def _clean_lines(lines: list[str]) -> list[str]:
+    cleaned = []
+    for line in lines:
+        if not line:
+            continue
+        line = re.sub(r"[\u200B-\u200D\uFEFF\x00-\x1F\x7F]", " ", line)
+        line = re.sub(r"\s+", " ", line).strip()
+        if not line:
+            continue
+        # remove bare slide numbers / "Slide 12"
+        if re.fullmatch(r"\d{1,3}", line) or re.match(r"^\s*slide\s+\d+\s*$", line, re.I):
+            continue
+        if FOOTER_RE.search(line):
+            continue
+        cleaned.append(line)
+    return cleaned
+
+def extract_text_by_slide(file):
+    prs = Presentation(file)
+    slides = []
+
+    # First pass: collect raw lines per slide
+    raw_per_slide = []
+    for slide in prs.slides:
+        lines = []
+        for shape in slide.shapes:
+            # text frames (title, bullets, placeholders)
+            if hasattr(shape, "text_frame") and shape.text_frame:
+                for p in shape.text_frame.paragraphs:
+                    if p.text and p.text.strip():
+                        lines.append(p.text.strip())
+            # tables
+            if getattr(shape, "shape_type", None) == 19:  # msoShapeTypeTable
+                for row in shape.table.rows:
+                    for cell in row.cells:
+                        if cell.text and cell.text.strip():
+                            lines.append(cell.text.strip())
+            # grouped shapes
+            if hasattr(shape, "shapes"):
+                for s in shape.shapes:
+                    if hasattr(s, "text_frame") and s.text_frame:
+                        for p in s.text_frame.paragraphs:
+                            if p.text and p.text.strip():
+                                lines.append(p.text.strip())
+        raw_per_slide.append(lines)
+
+    # Find lines that repeat across many slides (headers/footers) and drop them
+    all_lines = [ln for lines in raw_per_slide for ln in lines]
+    norm = lambda t: re.sub(r"\s+", " ", t.strip().lower())
+    counts = Counter(norm(t) for t in all_lines if t and len(t) > 10)
+    common = {t for t, c in counts.items() if c >= 3}  # appears on ≥3 slides
+
+    for i, lines in enumerate(raw_per_slide, start=1):
+        title = ""
+        # clean & remove common footers/headers
+        lines = _clean_lines(lines)
+        lines = [ln for ln in lines if norm(ln) not in common]
+        if lines:
+            title = lines[0]
+        body = "\n".join(lines[1:]).strip() if len(lines) > 1 else ""
+        slides.append({"page": i, "title": title or f"Slide {i}", "text": body})
+    return slides
+
+def create_session(pptx_text: str, summary: str):
+    sid = str(uuid.uuid4())
+    sessions[sid] = {"pptx_text": pptx_text, "summary": summary, "chat_history": []}
+    return sid
+
+def get_session(session_id: str):
+    return sessions.get(session_id)
