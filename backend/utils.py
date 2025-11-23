@@ -46,7 +46,7 @@ def extract_text_by_slide(file):
                     if p.text and p.text.strip():
                         lines.append(p.text.strip())
             # tables
-            if getattr(shape, "shape_type", None) == 19:  # msoShapeTypeTable
+            if getattr(shape, "shape_type", None) == 19: 
                 for row in shape.table.rows:
                     for cell in row.cells:
                         if cell.text and cell.text.strip():
@@ -60,7 +60,7 @@ def extract_text_by_slide(file):
                                 lines.append(p.text.strip())
         raw_per_slide.append(lines)
 
-    # Find lines that repeat across many slides (headers/footers) and drop them
+    
     all_lines = [ln for lines in raw_per_slide for ln in lines]
     norm = lambda t: re.sub(r"\s+", " ", t.strip().lower())
     counts = Counter(norm(t) for t in all_lines if t and len(t) > 10)
@@ -77,9 +77,15 @@ def extract_text_by_slide(file):
         slides.append({"page": i, "title": title or f"Slide {i}", "text": body})
     return slides
 
-def create_session(pptx_text: str, summary: str):
+def create_session(pptx_text: str, summary_text: str, slides_payload: list[dict] | None = None) -> str:
+    import uuid
     sid = str(uuid.uuid4())
-    sessions[sid] = {"pptx_text": pptx_text, "summary": summary, "chat_history": []}
+    sessions[sid] = {
+        "pptx_text": pptx_text,
+        "summary": summary_text,
+        "slides": slides_payload or [], 
+        "chat_history": [],  
+    }
     return sid
 
 def get_session(session_id: str):

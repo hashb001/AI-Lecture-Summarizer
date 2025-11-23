@@ -41,17 +41,16 @@ function escapeHtml(s) {
   return s?.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])) || "";
 }
 
-// ---- UI helpers ----
+
 function appendMessage(text, sender) {
   const msg = document.createElement("div");
   msg.classList.add("message", sender);
 
-  // Simple formatting: keep it readable; render bullets & slide headers
-  const formatted = text
-    .replace(/\*\*Slide (\d+): (.*?)\*\*/g, '<div class="slide-title">📑 <strong>Slide $1:</strong> $2</div>')
-    .replace(/\n•\s/g, "<ul><li>")
-    .replace(/\n/g, "</li><li>")
-    .replace(/<\/li><li>$/, "</li></ul>");
+  // FIX: Use simple <br> tags instead of complex nested lists
+  let formatted = text
+    .replace(/\*\*Slide (\d+): (.*?)\*\*/g, '<br><strong style="font-size:1.1em">📑 Slide $1: $2</strong><br>')
+    .replace(/\n•\s/g, "<br>• ")  // Bullet points
+    .replace(/\n/g, "<br>");      // Newlines
 
   msg.innerHTML = formatted;
   messagesDiv.appendChild(msg);
@@ -83,8 +82,9 @@ function loadChat(id) {
   chat.messages.forEach((m) => appendMessage(m.text, m.sender));
 }
 
-// ---- Backend call ----
+
 async function sendToBackend({ message, file }) {
+  console.log("sendToBackend", { message, sessionId, fileName: file ? file.name : null });
   const formData = new FormData();
   formData.append("message", message || "Summarize this presentation");
   if (sessionId) formData.append("session_id", sessionId);
@@ -100,35 +100,75 @@ async function sendToBackend({ message, file }) {
   const data = await res.json();
   if (data.session_id) sessionId = data.session_id;
 
-  // Prefer the big slide-by-slide summary if present; otherwise the single response
-  const text = data.summary ? data.summary : data.response || "(no response)";
+  // Prioritize response over summary (response is for chat, summary is for file upload)
+  const text = data.response || data.summary || "(no response)";
   return { text };
 }
 
-// ---- Events ----
+
+// File input handler - processes file uploads separately
+fileInput.addEventListener("change", async () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+  
+  setProgress(3, "Uploading & extracting slides…");
+  const form1 = new FormData(); form1.append("file", file);
+  const r1 = await fetch("/api/extract", { method: "POST", body: form1 });
+  const d1 = await r1.json();
+  if (d1.error) { 
+    renderSlideCard("-", "Error", [d1.error]); 
+    fileInput.value = ""; // Clear on error too
+    return; 
+  }
+  sessionId = d1.session_id;
+  const slides = d1.slides || [];
+  messagesDiv.innerHTML = ""; 
+
+  const total = slides.length || 1;
+  for (let i = 0; i < slides.length; i++) {
+    // show progress using completed slides
+    setProgress(Math.round(((i + 1) / total) * 100), `Summarizing slide ${i + 1}/${total}…`);
+    const s = slides[i];
+    const form2 = new FormData();
+    form2.append("session_id", sessionId);
+    form2.append("page", s.page);
+    form2.append("title", s.title || "");
+    form2.append("text", s.text || "");
+    const r2 = await fetch("/api/summarize/slide", { method: "POST", body: form2 });
+    const d2 = await r2.json();
+    renderSlideCard(d2.page, d2.title, d2.bullets || []);
+  }
+  setProgress(100, "Done");
+  
+  // Clear the input after processing to prevent re-uploading when asking for slides
+  fileInput.value = "";
+});
+
+// Main sendMessage function - handles chat messages (not file uploads)
 async function sendMessage() {
   const message = userInput.value.trim();
-  const file = fileInput.files[0] || null;
+  
+  // Don't send file from input - file uploads are handled by fileInput change event
+  // Only send file if explicitly provided (which won't happen in normal chat flow)
+  const file = null;
 
-  if (!message && !file) return;
+  if (!message) return;
 
-  if (file) {
-    appendMessage(`📤 Uploading ${file.name}...`, "user");
-    saveMessage(`📤 Uploading ${file.name}...`, "user");
-  } else {
-    appendMessage(message, "user");
-    saveMessage(message, "user");
+  if (!sessionId) {
+    appendMessage('⚠️ Upload a PPTX first to ask follow-up questions.', 'ai');
+    return;
   }
 
+  appendMessage(message, "user");
+  saveMessage(message, "user");
+
   userInput.value = "";
-  fileInput.value = "";
 
   try {
     const { text } = await sendToBackend({ message, file });
     appendMessage(text, "ai");
     saveMessage(text, "ai");
 
-    // Set a nicer chat title the first time we get a summary
     if (currentChat.title === "New Chat" && text.startsWith("🧾")) {
       currentChat.title = "PPTX summary";
       refreshChatList();
@@ -142,36 +182,5 @@ async function sendMessage() {
 
 sendBtn.addEventListener("click", sendMessage);
 userInput.addEventListener("keypress", (e) => { if (e.key === "Enter") sendMessage(); });
-fileInput.addEventListener("change", async () => {
-  const file = fileInput.files[0];
-  if (!file) return;
-
-  // 1) EXTRACT slides (fast)
-  setProgress(3, "Uploading & extracting slides…");
-  const form1 = new FormData(); form1.append("file", file);
-  const r1 = await fetch("/api/extract", { method: "POST", body: form1 });
-  const d1 = await r1.json();
-  if (d1.error) { renderSlideCard("-", "Error", [d1.error]); return; }
-  sessionId = d1.session_id;
-  const slides = d1.slides || [];
-  messagesDiv.innerHTML = ""; // clear area for results
-
-  // 2) SUMMARIZE each slide (progress by slide)
-  const total = slides.length || 1;
-  for (let i = 0; i < slides.length; i++) {
-    setProgress(Math.round((i / total) * 100), `Summarizing slide ${i + 1}/${total}…`);
-    const s = slides[i];
-    const form2 = new FormData();
-    form2.append("session_id", sessionId);
-    form2.append("page", s.page);
-    form2.append("title", s.title || "");
-    form2.append("text", s.text || "");
-    const r2 = await fetch("/api/summarize/slide", { method: "POST", body: form2 });
-    const d2 = await r2.json();
-    renderSlideCard(d2.page, d2.title, d2.bullets || []);
-  }
-  setProgress(100, "Done");
-});
-
 
 refreshChatList();
