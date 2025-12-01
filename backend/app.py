@@ -114,7 +114,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+auth_scheme = HTTPBearer(auto_error=False)
 frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend")
 app.mount("/static", StaticFiles(directory=frontend_path), name="static")
 
@@ -123,7 +123,11 @@ async def serve_home():
     return FileResponse(os.path.join(frontend_path, "index.html"))
 
 logging.basicConfig(level=logging.INFO)
-
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(auth_scheme),
+    db: Session = Depends(get_db),
+) -> User:
+    return _resolve_user(credentials, db, required=True)
 
 @app.post("/api/auth/register", response_model=UserOut)
 def register_user(payload: UserCreate, db: Session = Depends(get_db)):
@@ -234,7 +238,7 @@ def list_summaries(
     summaries = query.order_by(Summary.created_at.desc()).all()
     return summaries
 
-auth_scheme = HTTPBearer(auto_error=False)
+
 
 
 @app.on_event("startup")
@@ -277,11 +281,7 @@ def _resolve_user(credentials: HTTPAuthorizationCredentials, db: Session, *, req
     return user
 
 
-def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(auth_scheme),
-    db: Session = Depends(get_db),
-) -> User:
-    return _resolve_user(credentials, db, required=True)
+
 
 
 def get_optional_user(

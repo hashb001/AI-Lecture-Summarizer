@@ -56,3 +56,4 @@ class Summary(Base):
     user = relationship("User", back_populates="summaries")
     course = relationship("Course", back_populates="summaries")
 
+

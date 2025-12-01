@@ -4,7 +4,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 
-DEFAULT_DB_URL = "postgresql+psycopg://postgres:postgres@localhost:5432/lecture_summarizer"
+DEFAULT_DB_URL = "postgresql+psycopg://postgres:Deimos2022127642?@localhost:5432/lecture_summarizer"
 
 DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_DB_URL)
 

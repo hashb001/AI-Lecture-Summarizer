@@ -35,3 +35,4 @@ def decode_access_token(token: str) -> dict:
     except JWTError as exc:
         raise ValueError("Invalid token") from exc
 
+
