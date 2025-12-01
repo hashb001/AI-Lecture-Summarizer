@@ -1,4 +1,4 @@
-# backend/utils.py
+
 import re
 import uuid
 from pptx import Presentation
@@ -23,7 +23,7 @@ def _clean_lines(lines: list[str]) -> list[str]:
         line = re.sub(r"\s+", " ", line).strip()
         if not line:
             continue
-        # remove bare slide numbers / "Slide 12"
+        
         if re.fullmatch(r"\d{1,3}", line) or re.match(r"^\s*slide\s+\d+\s*$", line, re.I):
             continue
         if FOOTER_RE.search(line):
@@ -35,23 +35,22 @@ def extract_text_by_slide(file):
     prs = Presentation(file)
     slides = []
 
-    # First pass: collect raw lines per slide
     raw_per_slide = []
     for slide in prs.slides:
         lines = []
         for shape in slide.shapes:
-            # text frames (title, bullets, placeholders)
+            
             if hasattr(shape, "text_frame") and shape.text_frame:
                 for p in shape.text_frame.paragraphs:
                     if p.text and p.text.strip():
                         lines.append(p.text.strip())
-            # tables
+            
             if getattr(shape, "shape_type", None) == 19: 
                 for row in shape.table.rows:
                     for cell in row.cells:
                         if cell.text and cell.text.strip():
                             lines.append(cell.text.strip())
-            # grouped shapes
+            
             if hasattr(shape, "shapes"):
                 for s in shape.shapes:
                     if hasattr(s, "text_frame") and s.text_frame:
@@ -68,7 +67,7 @@ def extract_text_by_slide(file):
 
     for i, lines in enumerate(raw_per_slide, start=1):
         title = ""
-        # clean & remove common footers/headers
+        
         lines = _clean_lines(lines)
         lines = [ln for ln in lines if norm(ln) not in common]
         if lines:

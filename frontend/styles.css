@@ -14,11 +14,132 @@ body {
 
 /* Sidebar */
 #sidebar {
-  width: 260px;
+  width: 300px;
   background-color: #ffffff;
   border-right: 1px solid #e2e8f0;
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
+  padding-bottom: 12px;
+}
+
+.card {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px;
+  margin: 12px;
+}
+
+.hidden { display: none !important; }
+
+#authPanel {
+  padding: 12px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+#authPanel p {
+  margin: 0 0 10px;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+#authForms input {
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+  font-size: 0.9rem;
+}
+
+#authForms.collapsed {
+  display: none;
+}
+
+.auth-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+#logoutBtn {
+  margin-top: 10px;
+  width: 100%;
+  padding: 10px;
+  background: #64748b;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.panel-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #0f172a;
+}
+
+#coursePanel select {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+  font-size: 0.95rem;
+  margin-bottom: 10px;
+}
+
+.course-create input {
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+  font-size: 0.9rem;
+}
+
+.course-create button {
+  width: 100%;
+  padding: 10px;
+}
+
+.summary-section {
+  margin-top: 10px;
+}
+
+#summaryList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+#summaryList li {
+  padding: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background 0.2s;
+}
+
+#summaryList li span {
+  color: #94a3b8;
+  font-size: 0.8rem;
+}
+
+#summaryList li:hover {
+  background: #e2e8f0;
+}
+
+.empty-state {
+  font-size: 0.9rem;
+  color: #64748b;
+  margin: 0 0 8px;
 }
 
 .sidebar-header {
@@ -47,10 +168,12 @@ body {
 
 #chatHistory {
   flex: 1;
-  margin: 0;
+  margin: 0 12px;
   padding: 0;
   list-style: none;
   overflow-y: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
 }
 
 #chatHistory li {

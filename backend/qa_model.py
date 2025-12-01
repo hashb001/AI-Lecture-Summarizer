@@ -11,5 +11,6 @@ def answer_question(context: str, question: str) -> str:
 def explain_slide(context: str, prompt: str) -> str:
     """Generate a detailed explanation of slide content with longer output."""
     full_prompt = f"Context:\n\n{context}\n\n{prompt}"
-    result = qa_model(full_prompt, max_length=300, min_length=50)
+    
+    result = qa_model(full_prompt, max_length=512, min_length=100, do_sample=True, temperature=0.7)
     return result[0]['generated_text']

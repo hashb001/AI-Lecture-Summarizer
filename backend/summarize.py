@@ -1,4 +1,4 @@
-# backend/summarize.py
+
 import re
 from transformers import pipeline, AutoTokenizer
 
@@ -15,7 +15,7 @@ def _normalize(text: str) -> str:
 
 def _to_bullets(text: str, max_items: int) -> list[str]:
     sents = [s.strip("•-—–· \t") for s in SENT_SPLIT.split(text) if s.strip()]
-    # Drop tiny fragments & dedupe
+    
     bullets, seen = [], set()
     for s in sents:
         if len(s.split()) < 6:     
@@ -35,10 +35,10 @@ def summarize_slide(text: str, ratio: float = 0.65, max_bullets: int = 10) -> li
     if not text:
         return ["⚠️ No readable text found on this slide."]
 
-    # Count words & tokens once
+    
     words = len(text.split())
     if words < 25:
-        # Too short to summarize; return as one bullet
+        
         return [text]
 
     enc = tokenizer(text, add_special_tokens=False, return_attention_mask=False)

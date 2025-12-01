@@ -1,29 +1,50 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from typing import Optional
 import os
 import re
+from sqlalchemy.orm import Session
 
 from .utils import extract_text_by_slide, create_session, get_session, sessions
 from .summarize import summarize_slide          
 from .qa_model import answer_question, explain_slide          
 import logging
+from .database import Base, engine, get_db
+from .models import Course, Summary, User
+from .schemas import (
+    CourseCreate,
+    CourseOut,
+    LoginRequest,
+    SummaryCreate,
+    SummaryOut,
+    TokenResponse,
+    UserCreate,
+    UserOut,
+)
+from .auth import create_access_token, decode_access_token, get_password_hash, verify_password
 
-# -------------------------------
 
-# More flexible regex to catch patterns like "slide 11", "whats on slide 11", "show slide 11", etc.
 SLIDE_RX = re.compile(r"(?:slide|page)\s*(?:no\.?|number|#)?\s*[:.-]?\s*(\d{1,3})", re.I)
 
 def extract_slide_number(message: str) -> int | None:
-    """Extract slide number from message. Handles various formats like 'slide 11', 'whats on slide 11', etc."""
+    
     if not message:
         return None
     
     txt = message.lower()
    
-    # Try the main pattern first
+    
     m = SLIDE_RX.search(txt)
     if m:
         try:
@@ -32,14 +53,13 @@ def extract_slide_number(message: str) -> int | None:
         except ValueError:
             pass
     
-    # Fallback: look for standalone numbers after "slide" or "page" keywords
-    # This catches cases where there might be extra words between "slide" and the number
+    
     fallback_pattern = re.compile(r"(?:slide|page).*?(\d{1,3})", re.I)
     m = fallback_pattern.search(txt)
     if m:
         try:
             n = int(m.group(1))
-            # Only return if it's a reasonable slide number (1-999)
+            
             if 1 <= n <= 999:
                 return n
         except ValueError:
@@ -86,7 +106,7 @@ def clean_slide_text(text: str) -> str:
 
 app = FastAPI(title="AI Lecture Chat Summarizer")
 
-# Add CORS middleware before routes
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -104,6 +124,171 @@ async def serve_home():
 
 logging.basicConfig(level=logging.INFO)
 
+
+@app.post("/api/auth/register", response_model=UserOut)
+def register_user(payload: UserCreate, db: Session = Depends(get_db)):
+    existing = db.query(User).filter(User.email == payload.email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    user = User(
+        email=payload.email,
+        full_name=payload.full_name,
+        password_hash=get_password_hash(payload.password),
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@app.post("/api/auth/login", response_model=TokenResponse)
+def login_user(payload: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == payload.email).first()
+    if not user or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    token = create_access_token({"sub": user.email, "uid": str(user.id)})
+    return TokenResponse(access_token=token)
+
+
+@app.post("/api/auth/logout")
+def logout_user():
+    # JWT-based auth: client simply discards the token.
+    return {"detail": "Logged out"}
+
+
+@app.get("/api/auth/me", response_model=UserOut)
+def read_current_user(current_user: User = Depends(get_current_user)):
+    return current_user
+
+
+@app.get("/api/courses", response_model=list[CourseOut])
+def list_courses(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    courses = db.query(Course).filter(Course.owner_id == current_user.id).order_by(Course.created_at.desc()).all()
+    return courses
+
+
+@app.post("/api/courses", response_model=CourseOut)
+def create_course(
+    payload: CourseCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    course = Course(
+        owner_id=current_user.id,
+        name=payload.name,
+        subject=payload.subject,
+    )
+    db.add(course)
+    db.commit()
+    db.refresh(course)
+    return course
+
+
+@app.post("/api/summaries", response_model=SummaryOut)
+def save_summary(
+    payload: SummaryCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    course = (
+        db.query(Course)
+        .filter(Course.id == payload.course_id, Course.owner_id == current_user.id)
+        .first()
+    )
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    summary_text = payload.summary_text
+    if not summary_text or not summary_text.strip():
+        sess = get_session(payload.session_id) if payload.session_id else None
+        summary_text = (sess or {}).get("summary", "")
+    if not summary_text:
+        raise HTTPException(status_code=400, detail="Missing summary text")
+
+    summary = Summary(
+        user_id=current_user.id,
+        course_id=payload.course_id,
+        session_id=payload.session_id,
+        source_filename=payload.source_filename,
+        title=payload.title,
+        summary_text=summary_text,
+        slides_payload=payload.slides_payload,
+    )
+    db.add(summary)
+    db.commit()
+    db.refresh(summary)
+    return summary
+
+
+@app.get("/api/summaries", response_model=list[SummaryOut])
+def list_summaries(
+    course_id: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = db.query(Summary).filter(Summary.user_id == current_user.id)
+    if course_id:
+        query = query.filter(Summary.course_id == course_id)
+    summaries = query.order_by(Summary.created_at.desc()).all()
+    return summaries
+
+auth_scheme = HTTPBearer(auto_error=False)
+
+
+@app.on_event("startup")
+def on_startup():
+    Base.metadata.create_all(bind=engine)
+
+
+def _resolve_user(credentials: HTTPAuthorizationCredentials, db: Session, *, required: bool):
+    if not credentials:
+        if required:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Not authenticated",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return None
+    token = credentials.credentials
+    try:
+        payload = decode_access_token(token)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from None
+    email = payload.get("sub")
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(auth_scheme),
+    db: Session = Depends(get_db),
+) -> User:
+    return _resolve_user(credentials, db, required=True)
+
+
+def get_optional_user(
+    credentials: HTTPAuthorizationCredentials = Depends(auth_scheme),
+    db: Session = Depends(get_db),
+) -> Optional[User]:
+    return _resolve_user(credentials, db, required=False)
 
 
 @app.post("/api/extract")
@@ -142,16 +327,22 @@ async def summarize_one(
 
     return {"page": page, "title": title, "bullets": bullets}
 
-# In backend/app.py
+
 
 @app.post("/api/chat")
 async def chat_endpoint(
     message: str = Form(...),
     session_id: Optional[str] = Form(default=None),
-    file: Optional[UploadFile] = File(default=None)
+    course_id: Optional[int] = Form(default=None),
+    file: Optional[UploadFile] = File(default=None),
+    current_user: Optional[User] = Depends(get_optional_user),
+    db: Session = Depends(get_db),
 ):
-    # 1. HANDLE FILE UPLOAD (Only if a file is actually provided)
-    if file and file.filename: # check filename to ensure it's not an empty object
+    
+    if course_id and not current_user:
+        raise HTTPException(status_code=401, detail="Login required to save summaries")
+    
+    if file and file.filename: 
         if not file.filename.lower().endswith(".pptx"):
             return {"error": "Please upload a .pptx file"}
         
@@ -172,61 +363,89 @@ async def chat_endpoint(
             for sl in slides_payload
         )
         
-        # Create new session
+        
         new_session_id = create_session(" ".join(s["text"] for s in slides_raw), final_summary, slides_payload)
+        saved_summary_id = None
+        if current_user and course_id:
+            course = (
+                db.query(Course)
+                .filter(Course.id == course_id, Course.owner_id == current_user.id)
+                .first()
+            )
+            if not course:
+                raise HTTPException(status_code=404, detail="Course not found")
+            summary = Summary(
+                user_id=current_user.id,
+                course_id=course_id,
+                session_id=new_session_id,
+                source_filename=file.filename,
+                title=slides_payload[0]["title"] if slides_payload else None,
+                summary_text=final_summary,
+                slides_payload=slides_payload,
+            )
+            db.add(summary)
+            db.commit()
+            db.refresh(summary)
+            saved_summary_id = summary.id
+
         return {
             "response": "✅ Presentation summarized! Ask me about any slide.",
             "slides": slides_payload, 
             "summary": final_summary, 
-            "session_id": new_session_id
+            "session_id": new_session_id,
+            "saved_summary_id": saved_summary_id,
         }
 
-    # 2. VALIDATE SESSION
+    
     if not session_id:
         return {"error": "Session not found. Upload a PPTX first."}
     sess = get_session(session_id)
     if not sess:
         return {"error": "Invalid session ID."}
 
-    # 3. DIRECT COMMANDS (Specific Slide Lookup)
+    
     slide_num = extract_slide_number(message)
     slides = sess.get("slides", [])
 
     if slide_num:
         hit = next((s for s in slides if s["page"] == slide_num), None)
         if hit:
-            # Always use raw text, never use bullets (bullets are summaries)
-            content = hit.get("text", "").strip()
             
-            if not content:
-                # Only if there's absolutely no text, check bullets as last resort
+            content = hit.get("text", "").strip()
+            title = hit.get("title", "")
+            
+            
+            if not content or len(content.split()) < 10:
                 if hit.get("bullets"):
-                    content = "\n".join(hit["bullets"])
-                    # If we only have bullets, explain them but note they're a summary
-                    slide_context = f"Title: {hit['title']}\n\nContent: {content}"
-                    explanation_prompt = "Provide a detailed explanation of this slide content. Explain what it teaches, what the key concepts mean, and how they relate to each other. Elaborate on each point:"
+                    combined_content = f"{title}\n\n" + "\n".join(hit["bullets"])
+                    slide_context = f"Title: {title}\n\nContent: {combined_content}"
+                    explanation_prompt = "Provide a detailed explanation of this slide content. Explain what it teaches, what the key concepts mean, and how they relate to each other. Elaborate on each point with examples and context:"
                     explanation = explain_slide(slide_context, explanation_prompt)
-                    response = f"📑 **Slide {hit['page']}: {hit['title']}**\n\n{explanation}"
+                    response = f"📑 **Slide {hit['page']}: {title}**\n\n{explanation}"
+                elif not content:
+                    response = f"📑 **Slide {hit['page']}: {title}**\n\n(This slide seems to be empty or contains only images.)"
                 else:
-                    response = f"📑 **Slide {hit['page']}: {hit['title']}**\n\n(This slide seems to be empty or contains only images.)"
+                    
+                    slide_context = f"Title: {title}\n\nContent: {title}\n{content}"
+                    explanation_prompt = "Provide a detailed explanation of this slide. Explain what it teaches, what the key concepts mean, and how they relate to each other. Be thorough and detailed:"
+                    explanation = explain_slide(slide_context, explanation_prompt)
+                    response = f"📑 **Slide {hit['page']}: {title}**\n\n{explanation}"
             else:
-                # Generate an explanation of the slide using AI with the raw text
-                slide_context = f"Title: {hit['title']}\n\nContent: {content}"
-                explanation_prompt = "Provide a detailed explanation of this slide. Explain what it teaches, what the key concepts mean, and how they relate to each other. Do not just summarize - explain and elaborate on the meaning and significance:"
+                
+                slide_context = f"Title: {title}\n\nContent: {content}"
+                explanation_prompt = "Provide a detailed explanation of this slide. Explain what it teaches, what the key concepts mean, and how they relate to each other. Do not just summarize - explain and elaborate on the meaning and significance. Be thorough and detailed:"
                 explanation = explain_slide(slide_context, explanation_prompt)
-                response = f"📑 **Slide {hit['page']}: {hit['title']}**\n\n{explanation}"
+                response = f"📑 **Slide {hit['page']}: {title}**\n\n{explanation}"
             
             sess.setdefault("chat_history", []).append({"user": message, "ai": response})
             return {"response": response, "session_id": session_id}
         else:
-             # If user asked for "Slide 99" but it doesn't exist, STOP HERE.
-             # Do not fall through to the AI model.
+             
             response = f"⚠️ Slide {slide_num} not found. This deck has {len(slides)} slides."
             sess.setdefault("chat_history", []).append({"user": message, "ai": response})
             return {"response": response, "session_id": session_id}
 
-    # 4. INTELLIGENT SEARCH (Q&A)
-    # Only runs if it wasn't a specific slide request
+    
     context = ""
     if slides:
         top = pick_relevant_slides(message, slides, k=3)
@@ -236,14 +455,13 @@ async def chat_endpoint(
                 for s in top
             )
     
-    # If search failed, DO NOT just dump the whole summary. 
-    # It confuses the AI. Instead, check if the summary is small enough to fit.
+    
     if not context:
         summary_text = sess.get("summary", "")
-        if len(summary_text) < 3000: # Only use full summary if it's short
+        if len(summary_text) < 3000: 
             context = summary_text
         else:
-            # Fallback: Can't find relevant info
+            
             return {"response": "⚠️ I couldn't find specific information matching your question in the slides.", "session_id": session_id}
 
     ans = answer_question(context, message)
@@ -257,7 +475,6 @@ async def debug_session(session_id: str):
     sess = get_session(session_id)
     if not sess:
         return {"error": "session not found"}
-    # return a lightweight view
     return {
         "pptx_text_preview": (sess.get("pptx_text") or "")[:1000],
         "summary": sess.get("summary"),
@@ -269,5 +486,5 @@ async def debug_session(session_id: str):
 
 @app.get("/api/debug/sessions")
 async def debug_sessions_list():
-    # return current in-memory session ids (temporary)
+    
     return {"sessions": list(sessions.keys())}

@@ -1,10 +1,14 @@
 
-const API_BASE = window.location.origin; // http://127.0.0.1:8000
-
+const API_BASE = window.location.origin;
 
 let sessionId = null;
 let chats = [];
 let currentChat = { id: Date.now(), title: "New Chat", messages: [] };
+let authToken = localStorage.getItem("als_token") || "";
+let currentUser = null;
+let courses = [];
+let selectedCourseId = Number(localStorage.getItem("als_course_id")) || null;
+let savedSummaries = [];
 
 const messagesDiv = document.getElementById("messages");
 const sendBtn = document.getElementById("sendBtn");
@@ -16,11 +20,28 @@ const progressBox = document.getElementById("progress");
 const progressBar = document.getElementById("progress-bar");
 const progressTxt = document.getElementById("progress-text");
 
+const authStatus = document.getElementById("authStatus");
+const authNameInput = document.getElementById("authName");
+const authEmailInput = document.getElementById("authEmail");
+const authPasswordInput = document.getElementById("authPassword");
+const registerBtn = document.getElementById("registerBtn");
+const loginBtn = document.getElementById("loginBtn");
+const logoutBtn = document.getElementById("logoutBtn");
+
+const coursePanel = document.getElementById("coursePanel");
+const courseSelect = document.getElementById("courseSelect");
+const courseNameInput = document.getElementById("courseName");
+const courseSubjectInput = document.getElementById("courseSubject");
+const createCourseBtn = document.getElementById("createCourseBtn");
+
+const summaryList = document.getElementById("summaryList");
+const summaryEmpty = document.getElementById("summaryEmpty");
+
 function setProgress(pct, text) {
   progressBox.classList.remove("hidden");
   progressBar.innerHTML = `<div style="width:${pct}%;height:100%;background:#2563eb;transition:width .2s"></div>`;
   progressTxt.textContent = text;
-  if (pct >= 100) setTimeout(() => progressBox.classList.add("hidden"), 800);
+  if (pct >= 100) setTimeout(() => progressBox.classList.add("hidden"), 900);
 }
 
 function renderSlideCard(page, title, bullets) {
@@ -31,27 +52,30 @@ function renderSlideCard(page, title, bullets) {
   h.innerHTML = `📑 <strong>Slide ${page}:</strong> ${escapeHtml(title || "")}`;
   const ul = document.createElement("ul");
   ul.className = "slide-bullets";
-  bullets.forEach(b => { const li = document.createElement("li"); li.textContent = b; ul.appendChild(li); });
-  wrapper.appendChild(h); wrapper.appendChild(ul);
+  bullets.forEach((b) => {
+    const li = document.createElement("li");
+    li.textContent = b;
+    ul.appendChild(li);
+  });
+  wrapper.appendChild(h);
+  wrapper.appendChild(ul);
   messagesDiv.appendChild(wrapper);
   messagesDiv.scrollTop = messagesDiv.scrollHeight;
 }
 
 function escapeHtml(s) {
-  return s?.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])) || "";
+  return (
+    s?.replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m])) || ""
+  );
 }
-
 
 function appendMessage(text, sender) {
   const msg = document.createElement("div");
   msg.classList.add("message", sender);
-
-  // FIX: Use simple <br> tags instead of complex nested lists
   let formatted = text
     .replace(/\*\*Slide (\d+): (.*?)\*\*/g, '<br><strong style="font-size:1.1em">📑 Slide $1: $2</strong><br>')
-    .replace(/\n•\s/g, "<br>• ")  // Bullet points
-    .replace(/\n/g, "<br>");      // Newlines
-
+    .replace(/\n•\s/g, "<br>• ")
+    .replace(/\n/g, "<br>");
   msg.innerHTML = formatted;
   messagesDiv.appendChild(msg);
   messagesDiv.scrollTop = messagesDiv.scrollHeight;
@@ -82,51 +106,319 @@ function loadChat(id) {
   chat.messages.forEach((m) => appendMessage(m.text, m.sender));
 }
 
+function setAuthToken(token) {
+  authToken = token;
+  if (token) {
+    localStorage.setItem("als_token", token);
+  } else {
+    localStorage.removeItem("als_token");
+  }
+}
+
+function updateAuthUI() {
+  if (currentUser) {
+    authStatus.textContent = `Signed in as ${currentUser.full_name || currentUser.email}`;
+    logoutBtn.classList.remove("hidden");
+    coursePanel.classList.remove("hidden");
+    document.getElementById("authForms").classList.add("collapsed");
+  } else {
+    authStatus.textContent = "Guest mode (sign in to save summaries)";
+    logoutBtn.classList.add("hidden");
+    coursePanel.classList.add("hidden");
+    document.getElementById("authForms").classList.remove("collapsed");
+  }
+  summaryEmpty.textContent = currentUser ? "Pick a course to see saved summaries." : "Log in to view saved summaries.";
+  renderSummaryList();
+}
+
+async function refreshAuthState() {
+  if (!authToken) {
+    currentUser = null;
+    updateAuthUI();
+    return;
+  }
+  try {
+    const res = await fetch("/api/auth/me", {
+      headers: { Authorization: `Bearer ${authToken}` },
+    });
+    if (!res.ok) {
+      throw new Error("Session expired");
+    }
+    currentUser = await res.json();
+    updateAuthUI();
+    await fetchCourses();
+  } catch (err) {
+    console.warn(err);
+    setAuthToken("");
+    currentUser = null;
+    updateAuthUI();
+  }
+}
+
+async function registerUser() {
+  const payload = {
+    full_name: authNameInput.value.trim() || null,
+    email: authEmailInput.value.trim(),
+    password: authPasswordInput.value.trim(),
+  };
+  if (!payload.email || !payload.password) {
+    appendMessage("⚠️ Email and password are required to register.", "ai");
+    return;
+  }
+  const res = await fetch("/api/auth/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    appendMessage(`❌ ${data.detail || "Could not register"}`, "ai");
+    return;
+  }
+  appendMessage("✅ Account created. You can log in now.", "ai");
+}
+
+async function loginUser() {
+  const payload = {
+    email: authEmailInput.value.trim(),
+    password: authPasswordInput.value.trim(),
+  };
+  if (!payload.email || !payload.password) {
+    appendMessage("⚠️ Email and password are required to log in.", "ai");
+    return;
+  }
+  const res = await fetch("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    appendMessage(`❌ ${data.detail || "Invalid login"}`, "ai");
+    return;
+  }
+  setAuthToken(data.access_token);
+  authPasswordInput.value = "";
+  await refreshAuthState();
+  appendMessage("✅ Logged in. Choose or create a course to save summaries.", "ai");
+}
+
+function logoutUser() {
+  setAuthToken("");
+  currentUser = null;
+  courses = [];
+  selectedCourseId = null;
+  localStorage.removeItem("als_course_id");
+  updateAuthUI();
+  appendMessage("👋 Logged out. Summaries will no longer be saved.", "ai");
+}
+
+async function fetchCourses() {
+  if (!currentUser) return;
+  const res = await fetch("/api/courses", {
+    headers: { Authorization: `Bearer ${authToken}` },
+  });
+  if (!res.ok) return;
+  courses = await res.json();
+  populateCourseSelect();
+  if (courses.length && !selectedCourseId) {
+    setSelectedCourse(courses[0].id);
+  } else if (selectedCourseId) {
+    const exists = courses.some((c) => c.id === Number(selectedCourseId));
+    if (!exists) {
+      setSelectedCourse(courses[0]?.id || null);
+    } else {
+      await fetchSummaries();
+    }
+  }
+}
+
+function populateCourseSelect() {
+  courseSelect.innerHTML = "";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = courses.length ? "Select a course" : "No courses yet";
+  courseSelect.appendChild(placeholder);
+  courses.forEach((course) => {
+    const option = document.createElement("option");
+    option.value = course.id;
+    option.textContent = course.subject ? `${course.name} · ${course.subject}` : course.name;
+    if (Number(course.id) === Number(selectedCourseId)) {
+      option.selected = true;
+    }
+    courseSelect.appendChild(option);
+  });
+}
+
+async function handleCreateCourse() {
+  if (!currentUser) {
+    appendMessage("⚠️ You must be logged in to create courses.", "ai");
+    return;
+  }
+  const payload = {
+    name: courseNameInput.value.trim(),
+    subject: courseSubjectInput.value.trim() || null,
+  };
+  if (!payload.name) {
+    appendMessage("⚠️ Enter a course name first.", "ai");
+    return;
+  }
+  const res = await fetch("/api/courses", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${authToken}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    appendMessage(`❌ ${data.detail || "Could not create course"}`, "ai");
+    return;
+  }
+  courseNameInput.value = "";
+  courseSubjectInput.value = "";
+  await fetchCourses();
+  setSelectedCourse(data.id);
+  appendMessage(`✅ Course "${data.name}" created.`, "ai");
+}
+
+function setSelectedCourse(id) {
+  if (!id) {
+    selectedCourseId = null;
+    localStorage.removeItem("als_course_id");
+  } else {
+    selectedCourseId = Number(id);
+    localStorage.setItem("als_course_id", selectedCourseId);
+  }
+  if (courseSelect.value !== String(selectedCourseId || "")) {
+    courseSelect.value = String(selectedCourseId || "");
+  }
+  fetchSummaries();
+}
+
+async function fetchSummaries() {
+  if (!currentUser || !selectedCourseId) {
+    savedSummaries = [];
+    renderSummaryList();
+    return;
+  }
+  const res = await fetch(`/api/summaries?course_id=${selectedCourseId}`, {
+    headers: { Authorization: `Bearer ${authToken}` },
+  });
+  if (!res.ok) {
+    savedSummaries = [];
+    renderSummaryList();
+    return;
+  }
+  savedSummaries = await res.json();
+  renderSummaryList();
+}
+
+function renderSummaryList() {
+  summaryList.innerHTML = "";
+  if (!currentUser) {
+    summaryEmpty.classList.remove("hidden");
+    return;
+  }
+  if (!savedSummaries.length) {
+    summaryEmpty.classList.remove("hidden");
+    summaryEmpty.textContent = selectedCourseId
+      ? "No summaries saved for this course yet."
+      : "Pick a course to see saved summaries.";
+    return;
+  }
+  summaryEmpty.classList.add("hidden");
+  savedSummaries.forEach((summary) => {
+    const li = document.createElement("li");
+    const date = new Date(summary.created_at).toLocaleString();
+    li.innerHTML = `<strong>${escapeHtml(summary.title || "Untitled deck")}</strong><br><span>${date}</span>`;
+    li.onclick = () => showSummaryInChat(summary);
+    summaryList.appendChild(li);
+  });
+}
+
+function showSummaryInChat(summary) {
+  messagesDiv.innerHTML = "";
+  appendMessage(`📚 Saved summary: ${summary.title || "Untitled deck"}`, "ai");
+  const slides = summary.slides_payload || [];
+  slides.forEach((slide) => {
+    renderSlideCard(slide.page ?? "-", slide.title, slide.bullets || []);
+  });
+}
+
+async function persistSummary(sessionIdValue, slides, fileName) {
+  if (!currentUser || !selectedCourseId) return;
+  const payload = {
+    course_id: selectedCourseId,
+    session_id: sessionIdValue,
+    source_filename: fileName,
+    title: slides[0]?.title || fileName,
+    slides_payload: slides,
+  };
+  const res = await fetch("/api/summaries", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${authToken}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    appendMessage(`⚠️ Failed to save summary: ${data.detail || "unknown error"}`, "ai");
+    return;
+  }
+  appendMessage(`💾 Saved summary to course "${courses.find((c) => c.id === selectedCourseId)?.name || ""}".`, "ai");
+  await fetchSummaries();
+}
 
 async function sendToBackend({ message, file }) {
-  console.log("sendToBackend", { message, sessionId, fileName: file ? file.name : null });
   const formData = new FormData();
   formData.append("message", message || "Summarize this presentation");
   if (sessionId) formData.append("session_id", sessionId);
   if (file) formData.append("file", file);
+  if (selectedCourseId) formData.append("course_id", selectedCourseId);
 
-  const res = await fetch(`${API_BASE}/api/chat`, { method: "POST", body: formData });
+  const headers = {};
+  if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
 
+  const res = await fetch(`${API_BASE}/api/chat`, { method: "POST", body: formData, headers });
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
     throw new Error(`Server error (${res.status}): ${txt || "no details"}`);
   }
-
   const data = await res.json();
   if (data.session_id) sessionId = data.session_id;
-
-  // Prioritize response over summary (response is for chat, summary is for file upload)
   const text = data.response || data.summary || "(no response)";
   return { text };
 }
 
-
-// File input handler - processes file uploads separately
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files[0];
   if (!file) return;
-  
-  setProgress(3, "Uploading & extracting slides…");
-  const form1 = new FormData(); form1.append("file", file);
+
+  if (selectedCourseId && !currentUser) {
+    appendMessage("⚠️ Login required to save to a course.", "ai");
+    return;
+  }
+
+  setProgress(5, "Uploading & extracting slides…");
+  const form1 = new FormData();
+  form1.append("file", file);
   const r1 = await fetch("/api/extract", { method: "POST", body: form1 });
   const d1 = await r1.json();
-  if (d1.error) { 
-    renderSlideCard("-", "Error", [d1.error]); 
-    fileInput.value = ""; // Clear on error too
-    return; 
+  if (d1.error) {
+    renderSlideCard("-", "Error", [d1.error]);
+    fileInput.value = "";
+    return;
   }
   sessionId = d1.session_id;
   const slides = d1.slides || [];
-  messagesDiv.innerHTML = ""; 
+  messagesDiv.innerHTML = "";
 
   const total = slides.length || 1;
   for (let i = 0; i < slides.length; i++) {
-    // show progress using completed slides
     setProgress(Math.round(((i + 1) / total) * 100), `Summarizing slide ${i + 1}/${total}…`);
     const s = slides[i];
     const form2 = new FormData();
@@ -136,39 +428,37 @@ fileInput.addEventListener("change", async () => {
     form2.append("text", s.text || "");
     const r2 = await fetch("/api/summarize/slide", { method: "POST", body: form2 });
     const d2 = await r2.json();
+    slides[i].bullets = d2.bullets || [];
     renderSlideCard(d2.page, d2.title, d2.bullets || []);
   }
   setProgress(100, "Done");
-  
-  // Clear the input after processing to prevent re-uploading when asking for slides
+
+  if (currentUser && selectedCourseId) {
+    await persistSummary(sessionId, slides, file.name);
+  }
+
   fileInput.value = "";
 });
 
-// Main sendMessage function - handles chat messages (not file uploads)
 async function sendMessage() {
   const message = userInput.value.trim();
-  
-  // Don't send file from input - file uploads are handled by fileInput change event
-  // Only send file if explicitly provided (which won't happen in normal chat flow)
   const file = null;
 
   if (!message) return;
 
   if (!sessionId) {
-    appendMessage('⚠️ Upload a PPTX first to ask follow-up questions.', 'ai');
+    appendMessage("⚠️ Upload a PPTX first to ask follow-up questions.", "ai");
     return;
   }
 
   appendMessage(message, "user");
   saveMessage(message, "user");
-
   userInput.value = "";
 
   try {
     const { text } = await sendToBackend({ message, file });
     appendMessage(text, "ai");
     saveMessage(text, "ai");
-
     if (currentChat.title === "New Chat" && text.startsWith("🧾")) {
       currentChat.title = "PPTX summary";
       refreshChatList();
@@ -180,7 +470,21 @@ async function sendMessage() {
   }
 }
 
+registerBtn.addEventListener("click", registerUser);
+loginBtn.addEventListener("click", loginUser);
+logoutBtn.addEventListener("click", logoutUser);
+createCourseBtn.addEventListener("click", handleCreateCourse);
+courseSelect.addEventListener("change", (e) => setSelectedCourse(e.target.value));
+newChatBtn.addEventListener("click", () => {
+  currentChat = { id: Date.now(), title: "New Chat", messages: [] };
+  sessionId = null;
+  messagesDiv.innerHTML = "";
+});
+
 sendBtn.addEventListener("click", sendMessage);
-userInput.addEventListener("keypress", (e) => { if (e.key === "Enter") sendMessage(); });
+userInput.addEventListener("keypress", (e) => {
+  if (e.key === "Enter") sendMessage();
+});
 
 refreshChatList();
+refreshAuthState();

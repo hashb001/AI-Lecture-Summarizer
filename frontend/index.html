@@ -10,8 +10,41 @@
   <div id="app">
     <!-- Sidebar -->
     <aside id="sidebar">
+      <div id="authPanel">
+        <p id="authStatus">Guest mode (sign in to save summaries)</p>
+        <div id="authForms">
+          <input type="text" id="authName" placeholder="Full name (sign up)" />
+          <input type="email" id="authEmail" placeholder="Email" />
+          <input type="password" id="authPassword" placeholder="Password" />
+          <div class="auth-buttons">
+            <button id="registerBtn" type="button">Sign up</button>
+            <button id="loginBtn" type="button">Log in</button>
+          </div>
+        </div>
+        <button id="logoutBtn" class="hidden" type="button">Log out</button>
+      </div>
+
+      <div id="coursePanel" class="card hidden">
+        <div class="panel-header">
+          <h3>Courses</h3>
+        </div>
+        <select id="courseSelect"></select>
+        <div class="course-create">
+          <input type="text" id="courseName" placeholder="Course name e.g. History" />
+          <input type="text" id="courseSubject" placeholder="Subject (optional)" />
+          <button id="createCourseBtn" type="button">Add course</button>
+        </div>
+        <div class="summary-section">
+          <div class="panel-header">
+            <h3>Saved summaries</h3>
+          </div>
+          <p id="summaryEmpty" class="empty-state">Log in to view saved summaries.</p>
+          <ul id="summaryList"></ul>
+        </div>
+      </div>
+
       <div class="sidebar-header">
-        <h2>History</h2>
+        <h2>Chat history</h2>
         <button id="newChatBtn">＋</button>
       </div>
       <ul id="chatHistory"></ul>
