@@ -11,17 +11,26 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from .auth import decode_access_token
 from typing import Optional
+from pydantic import BaseModel
 import os
 import re
 from sqlalchemy.orm import Session
-
+from .models import Assignment, Quiz
 from .utils import extract_text_by_slide, create_session, get_session, sessions
 from .summarize import summarize_slide          
-from .qa_model import answer_question, explain_slide          
+from .qa_model import (
+    answer_question,
+    explain_slide,
+    generate_assignment_from_lecture,
+    generate_quiz_from_lecture
+)
+
+          
 import logging
 from .database import Base, engine, get_db
-from .models import Course, Summary, User
+from .models import Course, Summary, User, Assignment, Quiz
 from .schemas import (
     CourseCreate,
     CourseOut,
@@ -33,7 +42,8 @@ from .schemas import (
     UserOut,
 )
 from .auth import create_access_token, decode_access_token, get_password_hash, verify_password
-
+logger = logging.getLogger("ai_lecture_app")
+logging.basicConfig(level=logging.INFO)
 
 SLIDE_RX = re.compile(r"(?:slide|page)\s*(?:no\.?|number|#)?\s*[:.-]?\s*(\d{1,3})", re.I)
 
@@ -107,13 +117,16 @@ def clean_slide_text(text: str) -> str:
 app = FastAPI(title="AI Lecture Chat Summarizer")
 
 
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "*")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[FRONTEND_ORIGIN],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 auth_scheme = HTTPBearer(auto_error=False)
 frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend")
 app.mount("/static", StaticFiles(directory=frontend_path), name="static")
@@ -292,21 +305,60 @@ def get_optional_user(
 
 
 @app.post("/api/extract")
-async def extract_endpoint(file: UploadFile = File(...)):
+async def extract_endpoint(
+    file: UploadFile = File(...),
+    credentials: HTTPAuthorizationCredentials = Depends(auth_scheme),
+    db: Session = Depends(get_db),
+):
+    
     if not file.filename or not file.filename.lower().endswith(".pptx"):
+        logger.warning("Rejected non-pptx upload: %s", file.filename)
         return {"error": "Please upload a .pptx file"}
 
+    
+    current_user = None
+    if credentials:
+        try:
+            payload = decode_access_token(credentials.credentials)
+            email = payload.get("sub")
+            if email:
+                current_user = db.query(User).filter(User.email == email).first()
+        except ValueError:
+            logger.warning("Invalid token in /api/extract")
+            current_user = None
+
+    
+    logger.info("Extracting slides from %s", file.filename)
     slides = extract_text_by_slide(file.file)
+
+    
     slides_payload = [
-        {"page": s["page"], "title": s["title"], "text": s["text"], "bullets": []}
+        {
+            "page": s["page"],
+            "title": s["title"],
+            "text": s["text"],
+            "bullets": [],
+        }
         for s in slides
     ]
-    sid = create_session(" ".join(s["text"] for s in slides), "", slides_payload)
 
+    
+    sid = create_session(
+        " ".join(s["text"] for s in slides),
+        "",
+        slides_payload,
+        user_id=current_user.id if current_user else None,
+    )
+    logger.info("Created session %s with %d slides", sid, len(slides))
+    
     return {
         "session_id": sid,
-        "slides": [{"page": s["page"], "title": s["title"], "text": s["text"]} for s in slides]
+        "slides": [
+            {"page": s["page"], "title": s["title"], "text": s["text"]}
+            for s in slides
+        ],
     }
+
 
 @app.post("/api/summarize/slide")
 async def summarize_one(
@@ -401,7 +453,29 @@ async def chat_endpoint(
         return {"error": "Session not found. Upload a PPTX first."}
     sess = get_session(session_id)
     if not sess:
-        return {"error": "Invalid session ID."}
+            return {"error": "Invalid session ID."}
+
+    lowered = message.strip().lower()
+
+    if lowered.startswith("generate assignment"):
+            lecture_text = sess.get("summary") or sess.get("pptx_text") or ""
+            if not lecture_text:
+                ans = "⚠️ I don't have any lecture content yet. Upload and summarize a deck first."
+            else:
+                assignment = generate_assignment_from_lecture(lecture_text)
+                ans = f"📘 Assignment generated:\n\n{assignment}"
+            sess.setdefault("chat_history", []).append({"user": message, "ai": ans})
+            return {"response": ans, "session_id": session_id}
+
+    if lowered.startswith("generate quiz"):
+            lecture_text = sess.get("summary") or sess.get("pptx_text") or ""
+            if not lecture_text:
+                ans = "⚠️ I don't have any lecture content yet. Upload and summarize a deck first."
+            else:
+                quiz = generate_quiz_from_lecture(lecture_text)
+                ans = f"📝 Quiz generated:\n\n{quiz}"
+            sess.setdefault("chat_history", []).append({"user": message, "ai": ans})
+            return {"response": ans, "session_id": session_id}
 
     
     slide_num = extract_slide_number(message)
@@ -446,27 +520,137 @@ async def chat_endpoint(
             return {"response": response, "session_id": session_id}
 
     
-    context = ""
-    if slides:
-        top = pick_relevant_slides(message, slides, k=3)
-        if top:
-            context = "\n\n".join(
-                f"Slide {s['page']}: {s['title']}\n" + s.get("text", "")
-                for s in top
-            )
+    context = None
+    top = None
     
-    
+        # No specific slide matched – fall back to using the full summary as context
     if not context:
-        summary_text = sess.get("summary", "")
-        if len(summary_text) < 3000: 
+        summary_text = sess.get("summary", "") or ""
+        if summary_text:
+            # If very long, truncate to keep the model happy
+            if len(summary_text) > 6000:
+                summary_text = summary_text[:6000]
             context = summary_text
+            pages_used = []
         else:
-            
-            return {"response": "⚠️ I couldn't find specific information matching your question in the slides.", "session_id": session_id}
+            joined = "\n\n".join(
+                f"Slide {s.get('page')}: {s.get('title', '')}\n{s.get('text', '')}"
+                for s in slides
+            )
+            context = joined[:6000]
+            pages_used = [s.get("page") for s in slides if s.get("page") is not None]
 
-    ans = answer_question(context, message)
-    sess.setdefault("chat_history", []).append({"user": message, "ai": ans})
-    return {"response": ans, "session_id": session_id}
+    else:
+        # We used the 'top' slides for context
+        pages_used = [s.get("page") for s in top if s.get("page") is not None]
+
+    answer = answer_question(context, message)
+    sess.setdefault("chat_history", []).append({"user": message, "ai": answer})
+    return {"response": answer, "session_id": session_id, "used_slides": pages_used}
+
+class SessionText(BaseModel):
+    session_text: str
+
+@app.post("/api/assignments/{course_id}")
+def create_assignment(
+    course_id: int,
+    body: SessionText,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    
+
+    lecture_text = body.session_text or ""
+    if not lecture_text.strip():
+        raise HTTPException(status_code=400, detail="Empty lecture text")
+
+    content = generate_assignment_from_lecture(lecture_text)
+
+    assignment = Assignment(
+        course_id=course_id,
+        user_id=current_user.id,
+        title="Assignment from lecture",
+        content=content,
+    )
+    db.add(assignment)
+    db.commit()
+    db.refresh(assignment)
+    return {"id": assignment.id, "title": assignment.title, "content": assignment.content}
+
+
+
+
+@app.post("/api/quizzes/{course_id}")
+def create_quiz(
+    course_id: int,
+    body: SessionText,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    lecture_text = body.session_text or ""
+    if not lecture_text.strip():
+        raise HTTPException(status_code=400, detail="Empty lecture text")
+
+    content = generate_quiz_from_lecture(lecture_text)
+
+    quiz = Quiz(
+        course_id=course_id,
+        user_id=current_user.id,
+        title="Quiz from lecture",
+        content=content,
+    )
+    db.add(quiz)
+    db.commit()
+    db.refresh(quiz)
+    return {"id": quiz.id, "title": quiz.title, "content": quiz.content}
+
+
+
+@app.get("/api/courses/{course_id}/assignments")
+def list_assignments(
+    course_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    course = (
+        db.query(Course)
+        .filter(Course.id == course_id, Course.owner_id == current_user.id)
+        .first()
+    )
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    assignments = (
+        db.query(Assignment)
+        .filter(Assignment.course_id == course.id)
+        .order_by(Assignment.created_at.desc())
+        .all()
+    )
+    return assignments
+
+
+@app.get("/api/courses/{course_id}/quizzes")
+def list_quizzes(
+    course_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    course = (
+        db.query(Course)
+        .filter(Course.id == course_id, Course.owner_id == current_user.id)
+        .first()
+    )
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    quizzes = (
+        db.query(Quiz)
+        .filter(Quiz.course_id == course.id)
+        .order_by(Quiz.created_at.desc())
+        .all()
+    )
+    return quizzes
+
 
 
 

@@ -3,8 +3,9 @@ import re
 import uuid
 from pptx import Presentation
 from collections import Counter
-
-sessions = {}
+from .database import SessionLocal
+from .models import LectureSession
+sessions: dict[str, dict] = {}
 
 FOOTER_PATTERNS = [
     r"https?://\S+",
@@ -76,16 +77,57 @@ def extract_text_by_slide(file):
         slides.append({"page": i, "title": title or f"Slide {i}", "text": body})
     return slides
 
-def create_session(pptx_text: str, summary_text: str, slides_payload: list[dict] | None = None) -> str:
-    import uuid
+def create_session(
+    pptx_text: str,
+    summary_text: str,
+    slides_payload: list[dict] | None = None,
+    user_id: int | None = None,
+) -> str:
+    """Create a new lecture session both in memory and in the database."""
     sid = str(uuid.uuid4())
+
+    # Save to DB
+    db = SessionLocal()
+    try:
+        db_sess = LectureSession(
+            id=sid,
+            user_id=user_id,
+            pptx_text=pptx_text,
+            summary_text=summary_text,
+            slides_payload=slides_payload or [],
+        )
+        db.add(db_sess)
+        db.commit()
+    finally:
+        db.close()
+
+    # Also keep in memory for chat_history
     sessions[sid] = {
         "pptx_text": pptx_text,
         "summary": summary_text,
-        "slides": slides_payload or [], 
-        "chat_history": [],  
+        "slides": slides_payload or [],
+        "chat_history": [],
     }
     return sid
 
-def get_session(session_id: str):
-    return sessions.get(session_id)
+def get_session(session_id: str) -> dict | None:
+    """Get a session from memory or database."""
+    if session_id in sessions:
+        return sessions[session_id]
+
+    db = SessionLocal()
+    try:
+        db_sess = db.query(LectureSession).filter(LectureSession.id == session_id).first()
+        if not db_sess:
+            return None
+        # Reconstruct in-memory copy (no chat history persisted yet)
+        sess = {
+            "pptx_text": db_sess.pptx_text,
+            "summary": db_sess.summary_text or "",
+            "slides": db_sess.slides_payload or [],
+            "chat_history": [],
+        }
+        sessions[session_id] = sess
+        return sess
+    finally:
+        db.close()
